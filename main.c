@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <stdio.h>
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
@@ -13,11 +15,14 @@
 #define LED_PIN PD7 
 
 // Threshold for registering a hit
-#define THRESHOLD 300 
+#define THRESHOLD 500
 
 // Report buffer
 static uchar reportBuffer[2];
 static uchar idleRate;
+
+// Baseline value of buzzer potential
+static uint16_t baselineValue;
 
 const PROGMEM char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = { /* USB report descriptor */
     0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
@@ -56,36 +61,55 @@ void adcInit() {
     ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Enable ADC, prescaler 64
 }
 
-uint8_t buildReport(){
+ int readAdc(char chan)
+ {
+     ADMUX = (1<<REFS0) | (chan & 0x0f);  //select ref (REFS0) and channel
+     ADCSRA |= (1<<ADSC);                 //start the conversion
+     while (ADCSRA & (1<<ADSC));          //wait for end of conversion
+     return ADC;                            //Return 16 Bit Reading Register
+ }
+
+uint16_t getBaselineValue(){
+    uint16_t sum = 0;
+    uint16_t adc_value = 0;
+
+    for(uint8_t i = 0; i < 4; i++){
+	sum += readAdc(i);
+    }
+
+    printf("%d ", sum / 4);   
+    printf("\n");
+                              
+    return sum / 4;           
+}                             
+                           
+uint8_t buildReport(){        
     uint8_t highest_index = -1;
     uint16_t highest_value = 0;
     uint16_t adc_value = 0;
-
-    // Will be used to check if there was a change
+    uint16_t deviation = 0;   
+                              
+    // Will be used to chec   k if there was a change
     uint8_t tmpBuf[sizeof(reportBuffer)];
     memcpy(tmpBuf, reportBuffer, sizeof(tmpBuf));
-
-    reportBuffer[0] = 0;
-
-    // Check PC0-PC3 using the ADC
+                              
+    reportBuffer[0] = 0;      
+                              
     for(uint8_t i = 0; i < 4; i++){
-        // Select ADC channel
-        ADMUX = (ADMUX & 0xF0) | i; // Clear previous channel and set new one
-        // Start a conversion
-        ADCSRA |= (1 << ADSC);
-        // Wait for the conversion to complete
-        while(ADCSRA & (1 << ADSC));
+        adc_value = readAdc(i);
+        
+	printf("%d ", adc_value);   
 
-        // Read ADC value
-        adc_value = ADC;
+	deviation = abs(baselineValue - adc_value);
 
         // Check if this is the highest over the threshold
-        if(adc_value > THRESHOLD && adc_value > highest_value){
-            highest_value = adc_value;
+        if(deviation > THRESHOLD && deviation > highest_value){
+            highest_value = deviation;
             highest_index = i;
         }
     }
 
+    printf("\n");
     // Set key according to highest_index
     switch(highest_index){
         case 0: reportBuffer[1] = KEY_D; break;
@@ -147,6 +171,34 @@ void    usbEventResetReady(void)
     sei();
 }
 
+// UART =============================
+
+void uartInit(uint32_t baud) {
+    uint16_t ubrr = F_CPU/16/baud-1;
+    UBRR0H = (ubrr>>8);
+    UBRR0L = ubrr;
+
+    UCSR0B = (1<<RXEN0)|(1<<TXEN0);
+    UCSR0C = (1<<UCSZ01)|(1<<UCSZ00);
+}
+
+void uartTransmit(unsigned char data) {
+    while (!(UCSR0A & (1<<UDRE0)));
+    UDR0 = data;
+}
+
+int uart_putchar(char c, FILE *stream) {
+    if (c == '\n') {
+        uart_putchar('\r', stream);
+    }
+    uartTransmit(c);
+    return 0;
+}
+
+FILE uart_output = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
+
+
+// ==================================
 
 int main(){
     // Enable watchdog in case of an unrecoverable error
@@ -155,6 +207,7 @@ int main(){
 
     // LED and ADC init 
     DDRD |= (1 << LED_PIN);
+    DDRC = 0x00;
     adcInit();
 
     // Allow VUSB to initialize itself
@@ -168,6 +221,11 @@ int main(){
         _delay_ms(15);
     }
     usbDeviceConnect();
+
+    uartInit(9600);
+    stdout = &uart_output;
+
+    baselineValue = getBaselineValue();
 
     while(1){
         // Reset the watchdog reset countdown
