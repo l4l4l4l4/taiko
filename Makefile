@@ -1,6 +1,6 @@
 AVRDUDE_PART=m328p
 GCC_PART=atmega328p
-AVRDUDE =avrdude -b 19200 -c usbasp-clone -P usb -p $(AVRDUDE_PART)
+AVRDUDE =avrdude -c arduino -P /dev/ttyUSB0 -p $(AVRDUDE_PART)
 #atmega 328p over ArduinoISP
 
 COMPILE = avr-gcc -Wall -Os -Iusbdrv -I. -mmcu=$(GCC_PART) -DF_CPU=16000000UL -DDEBUG_LEVEL=0
