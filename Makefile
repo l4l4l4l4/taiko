@@ -1,6 +1,7 @@
 AVRDUDE_PART=m328p
 GCC_PART=atmega328p
-AVRDUDE =avrdude -c arduino -P /dev/ttyUSB0 -p $(AVRDUDE_PART)
+AVRDUDE =avrdude -c usbasp-clone -b 19200 -P usb -p $(AVRDUDE_PART)
+AVRDUDE_UART =avrdude -c arduino -b 115200 -P ft232r -p $(AVRDUDE_PART)
 #atmega 328p over ArduinoISP
 
 COMPILE = avr-gcc -Wall -Os -Iusbdrv -I. -mmcu=$(GCC_PART) -DF_CPU=16000000UL -DDEBUG_LEVEL=0
@@ -28,6 +29,9 @@ all:	main.hex
 
 flash:	all
 	$(AVRDUDE) -U flash:w:main.hex:i
+
+flash_uart:	all
+	$(AVRDUDE_UART) -U flash:w:main.hex:i
 
 
 # Fuse high byte:

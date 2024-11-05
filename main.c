@@ -15,7 +15,8 @@
 #define LED_PIN PD7 
 
 // Threshold for registering a hit
-#define THRESHOLD 500
+#define THRESHOLD 50
+#define POSTHITDELAY 50 //in ms
 
 // Report buffer
 static uchar reportBuffer[2];
@@ -23,6 +24,8 @@ static uchar idleRate;
 
 // Baseline value of buzzer potential
 static uint16_t baselineValue;
+
+static uint8_t isDelay;
 
 const PROGMEM char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = { /* USB report descriptor */
     0x05, 0x01,                    // USAGE_PAGE (Generic Desktop)
@@ -84,7 +87,7 @@ uint16_t getBaselineValue(){
 }                             
                            
 uint8_t buildReport(){        
-    uint8_t highest_index = -1;
+    uint8_t highest_index = 255;
     uint16_t highest_value = 0;
     uint16_t adc_value = 0;
     uint16_t deviation = 0;   
@@ -95,6 +98,12 @@ uint8_t buildReport(){
                               
     reportBuffer[0] = 0;      
                               
+    if (isDelay == 1) {
+        _delay_ms(POSTHITDELAY);
+	isDelay = 0;
+        return 0; // Skip processing if delay is active
+    }
+
     for(uint8_t i = 0; i < 4; i++){
         adc_value = readAdc(i);
         
@@ -109,7 +118,7 @@ uint8_t buildReport(){
         }
     }
 
-    printf("\n");
+    printf("|%d|", baselineValue);   
     // Set key according to highest_index
     switch(highest_index){
         case 0: reportBuffer[1] = KEY_D; break;
@@ -119,12 +128,18 @@ uint8_t buildReport(){
         default: reportBuffer[1] = 0; break; // No valid key pressed
     }
 
+    //Blink and set delay if hit
+    printf(" %d", highest_index);   
+    printf("\n");
+    if (highest_index < 10) {
+	isDelay = 1;
+    	PORTD ^= (1 << LED_PIN);
+    }
     // They are the same (no change)
     if(memcmp(tmpBuf, reportBuffer, sizeof(tmpBuf)) == 0){
         return 0;
     }
 
-    PORTD ^= (1 << LED_PIN);
     return 1;
 }
 
@@ -226,6 +241,7 @@ int main(){
     stdout = &uart_output;
 
     baselineValue = getBaselineValue();
+    isDelay = 0;
 
     while(1){
         // Reset the watchdog reset countdown
