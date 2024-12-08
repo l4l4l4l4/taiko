@@ -80,8 +80,8 @@ uint16_t getBaselineValue(){
 	sum += readAdc(i);
     }
 
-    printf("%d ", sum / 4);   
-    printf("\n");
+    //printf("%d ", sum / 4);   
+    //printf("\n");
                               
     return sum / 4;           
 }                             
@@ -107,7 +107,7 @@ uint8_t buildReport(){
     for(uint8_t i = 0; i < 4; i++){
         adc_value = readAdc(i);
         
-	printf("%d ", adc_value);   
+	//printf("%d ", adc_value);   
 
 	deviation = abs(baselineValue - adc_value);
 
@@ -118,7 +118,7 @@ uint8_t buildReport(){
         }
     }
 
-    printf("|%d|", baselineValue);   
+    //printf("|%d|", baselineValue);   
     // Set key according to highest_index
     switch(highest_index){
         case 0: reportBuffer[1] = KEY_D; break;
@@ -129,8 +129,8 @@ uint8_t buildReport(){
     }
 
     //Blink and set delay if hit
-    printf(" %d", highest_index);   
-    printf("\n");
+    //printf(" %d", highest_index);   
+    //printf("\n");
     if (highest_index < 10) {
 	isDelay = 1;
     	PORTD ^= (1 << LED_PIN);
@@ -237,8 +237,8 @@ int main(){
     }
     usbDeviceConnect();
 
-    uartInit(9600);
-    stdout = &uart_output;
+    //uartInit(9600);
+    //stdout = &uart_output;
 
     baselineValue = getBaselineValue();
     isDelay = 0;
