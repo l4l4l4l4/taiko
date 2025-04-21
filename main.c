@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <util/delay.h>
 
+#define UART_DEBUG // comment this out to disable.
+#define UART_SPEED 48000
+
 // Constants for piezo-to-key mapping
 #define KEY_D 0x07 // HID code for 'd'
 #define KEY_F 0x09 // HID code for 'f'
@@ -15,14 +18,15 @@
 #define LED_PIN PD7
 
 // Threshold for registering a hit
-#define THRESHOLD 20
+#define THRESHOLD 10
 
 // USB variables
 static uchar reportBuffer[2];
 static uchar idleRate;
 
-static uint8_t cooldownBits = 0; // use first 4 bits to determine if a channels
-                                 // should be sampled
+// hit calculation variables
+static uint8_t cooldownBits[4];
+static uint8_t lastStepMemory[4];
 static uint16_t baselineValue;
 
 const PROGMEM char
@@ -65,9 +69,6 @@ uint16_t getBaselineValue() {
     sum += readAdc(i);
   }
 
-  // printf("%d ", sum / 4);
-  // printf("\n");
-
   return sum / 4;
 }
 
@@ -106,20 +107,21 @@ uint8_t buildReport() {
   for (uint8_t i = 0; i < 4; i++) {
     adc_value = readAdc(i);
 
-    // printf("%d ", adc_value);
-
     deviation = abs(baselineValue - adc_value);
 
     // Check if the deviation is big enough and the cooldown bit is not set
     if (deviation > THRESHOLD)
       addToReport(i);
 
-    // printf(" %d", deviation);
+#ifdef UART_DEBUG
+    printf(" %d", deviation);
+#endif /* ifdef UART_DEBUG */
   }
 
-  // printf("|%d|", baselineValue);
-  // printf("\n");
-
+#ifdef UART_DEBUG
+  printf("|%d|", baselineValue);
+  printf("\n");
+#endif /* ifdef UART_DEBUG */
   // They are the same (no change)
   if (memcmp(tmpBuf, reportBuffer, sizeof(tmpBuf)) == 0) {
     return 0;
@@ -220,10 +222,14 @@ int main() {
   }
   usbDeviceConnect();
 
-  // uartInit(48000);
-  // stdout = &uart_output;
+#ifdef UART_DEBUG
+  uartInit(UART_SPEED);
+  stdout = &uart_output;
+#endif /* ifdef UART_DEBUG */
 
   baselineValue = getBaselineValue();
+  memset(cooldownBits, 0, sizeof(cooldownBits));
+  memset(lastStepMemory, 0, sizeof(lastStepMemory));
 
   while (1) {
     // Reset the watchdog reset countdown
@@ -242,7 +248,9 @@ int main() {
     if (usbInterruptIsReady() && change == 1) {
       // Send over the HID data
       usbSetInterrupt(reportBuffer, sizeof(reportBuffer));
+#ifdef UART_DEBUG
       printf("REPORT %d %d\n", reportBuffer[0], reportBuffer[1]);
+#endif /* ifdef UART_DEBUG */
     }
   }
 
