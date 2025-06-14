@@ -6,8 +6,9 @@
 #include <stdlib.h>
 #include <util/delay.h>
 
-#define UART_DEBUG // comment this out to disable.
-#define UART_SPEED 48000
+// #define UART_DEBUG // comment this out to disable.
+// #define UART_SPEED 48000
+FILE uart_output;
 
 // Constants for piezo-to-key mapping
 #define KEY_D 0x07 // HID code for 'd'
@@ -18,7 +19,7 @@
 #define LED_PIN PD7
 
 // Threshold for registering a hit
-#define THRESHOLD 10
+#define THRESHOLD 12
 
 // USB variables
 static uchar reportBuffer[2];
@@ -26,8 +27,13 @@ static uchar idleRate;
 
 // hit calculation variables
 static uint8_t cooldownBits[4];
-static uint8_t lastStepMemory[4];
-static uint16_t baselineValue;
+static uint16_t last_step_memory[4];
+
+// state stuff
+static uint8_t state;
+#define STATE_WAIT 0
+#define STATE_SEND_KEY 1
+#define STATE_SEND_BLANK 2
 
 const PROGMEM char
     usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = {
@@ -53,23 +59,12 @@ void adcInit() {
       (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Enable ADC, prescaler 64
 }
 
-int readAdc(char chan) {
+int adcRead(char chan) {
   ADMUX = (1 << REFS0) | (chan & 0x0f); // select ref (REFS0) and channel
   ADCSRA |= (1 << ADSC);                // start the conversion
   while (ADCSRA & (1 << ADSC))
-    ;         // wait for end of conversion
-  return ADC; // Return 16 Bit Reading Register
-}
-
-uint16_t getBaselineValue() {
-  uint16_t sum = 0;
-  uint16_t adc_value = 0;
-
-  for (uint8_t i = 0; i < 4; i++) {
-    sum += readAdc(i);
-  }
-
-  return sum / 4;
+    ;         // wait
+  return ADC; // Return 16 Bit Register
 }
 
 void addToReport(uint8_t channel_index) {
@@ -91,43 +86,30 @@ void addToReport(uint8_t channel_index) {
     reportBuffer[report_index] = KEY_K;
     break;
   }
-
-  PORTD ^= (1 << LED_PIN); // blink
 }
 
-uint8_t buildReport() {
-  uint16_t adc_value = 0;
-  uint16_t deviation = 0;
-
-  // Will be used to check if there was a change
-  uint8_t tmpBuf[sizeof(reportBuffer)];
-  memcpy(tmpBuf, reportBuffer, sizeof(tmpBuf));
-  memset(reportBuffer, 0, sizeof(reportBuffer));
+void buildReport() {
+  uint16_t adc_value;
+  uint16_t deviation;
 
   for (uint8_t i = 0; i < 4; i++) {
-    adc_value = readAdc(i);
+    adc_value = adcRead(i);
+    deviation = abs(last_step_memory[i] - adc_value);
+    last_step_memory[i] = adc_value;
 
-    deviation = abs(baselineValue - adc_value);
-
-    // Check if the deviation is big enough and the cooldown bit is not set
-    if (deviation > THRESHOLD)
+    if (deviation > THRESHOLD) {
       addToReport(i);
+      state = STATE_SEND_KEY;
+    }
 
 #ifdef UART_DEBUG
-    printf(" %d", deviation);
+    printf("  |%d %d %d|", adc_value, last_step_memory[i], deviation);
 #endif /* ifdef UART_DEBUG */
   }
 
 #ifdef UART_DEBUG
-  printf("|%d|", baselineValue);
   printf("\n");
 #endif /* ifdef UART_DEBUG */
-  // They are the same (no change)
-  if (memcmp(tmpBuf, reportBuffer, sizeof(tmpBuf)) == 0) {
-    return 0;
-  }
-
-  return 1;
 }
 
 usbMsgLen_t usbFunctionSetup(uint8_t data[8]) {
@@ -196,8 +178,6 @@ int uart_putchar(char c, FILE *stream) {
   return 0;
 }
 
-FILE uart_output = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
-
 // ==================================
 
 int main() {
@@ -225,17 +205,16 @@ int main() {
 #ifdef UART_DEBUG
   uartInit(UART_SPEED);
   stdout = &uart_output;
+  uart_output = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
 #endif /* ifdef UART_DEBUG */
 
-  baselineValue = getBaselineValue();
   memset(cooldownBits, 0, sizeof(cooldownBits));
-  memset(lastStepMemory, 0, sizeof(lastStepMemory));
+  memset(last_step_memory, 1024 / 2, sizeof(last_step_memory));
+  state = STATE_WAIT;
 
   while (1) {
-    // Reset the watchdog reset countdown
     wdt_reset();
     usbPoll();
-    uint8_t change = buildReport();
 
     // 0 is an indefinite idle
     if (idleRate != 0) {
@@ -244,15 +223,21 @@ int main() {
       }
     }
 
-    // Interrupt IN request, and there is new data to report
-    if (usbInterruptIsReady() && change == 1) {
-      // Send over the HID data
+    if (state == STATE_WAIT)
+      buildReport();
+    else if (state == STATE_SEND_KEY && usbInterruptIsReady()) {
       usbSetInterrupt(reportBuffer, sizeof(reportBuffer));
-#ifdef UART_DEBUG
-      printf("REPORT %d %d\n", reportBuffer[0], reportBuffer[1]);
-#endif /* ifdef UART_DEBUG */
+      state = STATE_SEND_BLANK;
+    } else if (state == STATE_SEND_BLANK && usbInterruptIsReady()) {
+      memset(reportBuffer, 0, sizeof(reportBuffer));
+      usbSetInterrupt(reportBuffer, sizeof(reportBuffer));
+      state = STATE_WAIT;
+      PORTD ^= (1 << LED_PIN); // blink
     }
-  }
 
+#ifdef UART_DEBUG
+    printf("STATE %d\n", state);
+#endif /* ifdef UART_DEBUG */
+  }
   return 0;
 }
