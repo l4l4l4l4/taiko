@@ -1,0 +1,4 @@
+[toolchain]
+channel = "stable"
+profile = "release"
+targets = [ "thumbv7em-none-eabi" ]
