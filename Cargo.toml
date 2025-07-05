@@ -16,7 +16,7 @@ usbd-hid = "0.8.2"
 panic-probe = { version = "1.0.0" }
 
 [profile.release]
-debug = 2
-opt-level = "s"
-lto = "fat"
+opt-level = "z"
+strip = true
+lto = true
 panic = "abort"

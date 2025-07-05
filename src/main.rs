@@ -11,9 +11,10 @@ fn panic(_info: &PanicInfo) -> ! {
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::Driver;
-use embassy_stm32::{bind_interrupts, peripherals, usb, Config};
+use embassy_stm32::{Config, bind_interrupts, peripherals, usb};
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Handler};
@@ -48,6 +49,8 @@ async fn main(_spawner: Spawner) {
         config.rcc.mux.clk48sel = mux::Clk48sel::PLL1_Q;
     }
     let p = embassy_stm32::init(config);
+    let mut led = Output::new(p.PC13, Level::High, Speed::Low);
+    led.set_high();
 
     // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
@@ -59,7 +62,14 @@ async fn main(_spawner: Spawner) {
     // has to support it or USB won't work at all. See docs on `vbus_detection` for details.
     config.vbus_detection = false;
 
-    let driver = Driver::new_fs(p.USB_OTG_FS, Irqs, p.PA12, p.PA11, &mut ep_out_buffer, config);
+    let driver = Driver::new_fs(
+        p.USB_OTG_FS,
+        Irqs,
+        p.PA12,
+        p.PA11,
+        &mut ep_out_buffer,
+        config,
+    );
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
@@ -110,7 +120,6 @@ async fn main(_spawner: Spawner) {
 
     let (reader, mut writer) = hid.split();
 
-
     // Do stuff with the class!
     let in_fut = async {
         loop {
@@ -124,7 +133,7 @@ async fn main(_spawner: Spawner) {
             // Send the report.
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
-                Err(e) => todo!()
+                Err(e) => todo!(),
             };
             let report = KeyboardReport {
                 keycodes: [0, 0, 0, 0, 0, 0],
@@ -134,7 +143,7 @@ async fn main(_spawner: Spawner) {
             };
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
-                Err(e) => todo!()
+                Err(e) => todo!(),
             };
         }
     };
@@ -159,8 +168,7 @@ impl RequestHandler for MyRequestHandler {
         OutResponse::Accepted
     }
 
-    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {
-    }
+    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {}
 
     fn get_idle_ms(&mut self, id: Option<ReportId>) -> Option<u32> {
         None
