@@ -3,12 +3,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use core::panic::PanicInfo;
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
-
+use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_stm32::gpio::{Level, Output, Speed};
@@ -19,6 +14,7 @@ use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Handler};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
+use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
@@ -49,8 +45,9 @@ async fn main(_spawner: Spawner) {
         config.rcc.mux.clk48sel = mux::Clk48sel::PLL1_Q;
     }
     let p = embassy_stm32::init(config);
+
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
-    led.set_high();
+    led.set_low(); //this sets it HIGH, wtf?
 
     // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
@@ -133,7 +130,7 @@ async fn main(_spawner: Spawner) {
             // Send the report.
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
-                Err(e) => todo!(),
+                Err(e) => warn!("Failed to send report: {:?}", e),
             };
             let report = KeyboardReport {
                 keycodes: [0, 0, 0, 0, 0, 0],
@@ -143,7 +140,7 @@ async fn main(_spawner: Spawner) {
             };
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
-                Err(e) => todo!(),
+                Err(e) => warn!("Failed to send report: {:?}", e),
             };
         }
     };
@@ -161,16 +158,21 @@ struct MyRequestHandler {}
 
 impl RequestHandler for MyRequestHandler {
     fn get_report(&mut self, id: ReportId, _buf: &mut [u8]) -> Option<usize> {
+        info!("Get report for {:?}", id);
         None
     }
 
     fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
+        info!("Set report for {:?}: {=[u8]}", id, data);
         OutResponse::Accepted
     }
 
-    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {}
+    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {
+        info!("Set idle rate for {:?} to {:?}", id, dur);
+    }
 
     fn get_idle_ms(&mut self, id: Option<ReportId>) -> Option<u32> {
+        info!("Get idle rate for {:?}", id);
         None
     }
 }
@@ -190,17 +192,31 @@ impl MyDeviceHandler {
 impl Handler for MyDeviceHandler {
     fn enabled(&mut self, enabled: bool) {
         self.configured.store(false, Ordering::Relaxed);
+        if enabled {
+            info!("Device enabled");
+        } else {
+            info!("Device disabled");
+        }
     }
 
     fn reset(&mut self) {
         self.configured.store(false, Ordering::Relaxed);
+        info!("Bus reset, the Vbus current limit is 100mA");
     }
 
     fn addressed(&mut self, addr: u8) {
         self.configured.store(false, Ordering::Relaxed);
+        info!("USB address set to: {}", addr);
     }
 
     fn configured(&mut self, configured: bool) {
         self.configured.store(configured, Ordering::Relaxed);
+        if configured {
+            info!(
+                "Device configured, it may now draw up to the configured current limit from Vbus."
+            )
+        } else {
+            info!("Device is no longer configured, the Vbus current limit is 100mA.");
+        }
     }
 }
