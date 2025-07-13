@@ -3,25 +3,52 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use core::cell::RefCell;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::adc::{Adc, AdcChannel, AnyAdcChannel};
+use embassy_stm32::gpio::{AnyPin, Level, Output, Speed};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::Driver;
-use embassy_stm32::{Config, bind_interrupts, peripherals, usb};
+use embassy_stm32::{Config, Peri, bind_interrupts, peripherals, usb};
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_time::{Instant, Timer};
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Handler};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
 
+const THRESHOLD_HIT: u16 = 650;
+const SAMPLE_COUNT: u16 = 5;
+const COOLDOWN_TIME_MS: u64 = 25;
+const BASELINE_SAMPLE_COUNT: u16 = 5;
+const KEYCODES: [u8; 4] = [0x07, 0x09, 0x0d, 0x0e];
+
 bind_interrupts!(struct Irqs {
     OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
 });
 
+fn convert_to_millivolts(sample: u16, vrefint_sample: u16) -> u16 {
+    // From http://www.st.com/resource/en/datasheet/DM00071990.pdf
+    // 6.3.24 Reference voltage
+    const VREFINT_MV: u32 = 1210; // mV
+
+    (u32::from(sample) * VREFINT_MV / u32::from(vrefint_sample)) as u16
+}
+
+fn abs(value: i16) -> u16 {
+    if value < 0 {
+        (-value) as u16
+    } else {
+        value as u16
+    }
+}
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let mut config = Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -46,17 +73,22 @@ async fn main(_spawner: Spawner) {
     }
     let p = embassy_stm32::init(config);
 
+    let mut channels: [AnyAdcChannel<peripherals::ADC1>; 4] = [
+        p.PA0.degrade_adc(),
+        p.PA1.degrade_adc(),
+        p.PA2.degrade_adc(),
+        p.PA3.degrade_adc(),
+    ];
+
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
-    led.set_low(); //this sets it HIGH, wtf?
+
+    let mut adc = Adc::new(p.ADC1);
+    let mut vrefint = adc.enable_vrefint();
+    let vrefint_sample = adc.blocking_read(&mut vrefint);
 
     // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
     let mut config = embassy_stm32::usb::Config::default();
-
-    // Do not enable vbus_detection. This is a safe default that works in all boards.
-    // However, if your USB device is self-powered (can stay powered on if USB is unplugged), you need
-    // to enable vbus_detection to comply with the USB spec. If you enable it, the board
-    // has to support it or USB won't work at all. See docs on `vbus_detection` for details.
     config.vbus_detection = false;
 
     let driver = Driver::new_fs(
@@ -76,11 +108,9 @@ async fn main(_spawner: Spawner) {
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
-    // Create embassy-usb DeviceBuilder using the driver and config.
-    // It needs some buffers for building the descriptors.
     let mut config_descriptor = [0; 256];
     let mut bos_descriptor = [0; 256];
-    // You can also add a Microsoft OS descriptor.
+    // Microsoft OS descriptor??
     let mut msos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
 
@@ -108,21 +138,95 @@ async fn main(_spawner: Spawner) {
     };
 
     let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
+    let mut baseline: [u16; 4] = [0; 4];
+    for _ in 0..BASELINE_SAMPLE_COUNT {
+        for channel_number in 0..4 {
+            baseline[channel_number] += convert_to_millivolts(
+                adc.blocking_read(&mut channels[channel_number]),
+                vrefint_sample,
+            );
+        }
+        Timer::after_millis(500).await;
+        led.toggle();
+    }
 
-    // Build the builder.
+    for channel_number in 0..4 {
+        baseline[channel_number] /= BASELINE_SAMPLE_COUNT;
+    }
+    info!(
+        "baseline: {}, {}, {}, {}",
+        baseline[0], baseline[1], baseline[2], baseline[3]
+    );
+    // USB things
     let mut usb = builder.build();
-
-    // Run the USB device.
     let usb_fut = usb.run();
-
     let (reader, mut writer) = hid.split();
 
     // Do stuff with the class!
     let in_fut = async {
+        Timer::after_millis(1000).await;
+        let mut cooldown_timestamps: [Instant; 4] = [Instant::now(); 4];
+        let mut report_raw: [u8; 6] = [0; 6];
         loop {
-            // Create a report with the A key pressed. (no shift modifier)
+            let mut report_changed: bool = false;
+            let mut array_of_deviations_averaged: [u16; 4] = [0; 4];
+            //read values, get potential hits
+            for channel_number in 0..4 {
+                let mut deviation_averaged = 0;
+                for sample_number in 0..SAMPLE_COUNT {
+                    let value = convert_to_millivolts(
+                        adc.blocking_read(&mut channels[channel_number]),
+                        vrefint_sample,
+                    );
+                    let deviation = abs(baseline[channel_number] as i16 - value as i16);
+                    deviation_averaged += deviation;
+                }
+                deviation_averaged /= SAMPLE_COUNT;
+                array_of_deviations_averaged[channel_number] = deviation_averaged;
+                let cooldown_ended: bool = Instant::now()
+                    .duration_since(cooldown_timestamps[channel_number])
+                    .as_millis()
+                    > COOLDOWN_TIME_MS;
+                if cooldown_ended {
+                    if report_raw[channel_number] == 0 {
+                        if deviation_averaged > THRESHOLD_HIT {
+                            report_raw[channel_number] = KEYCODES[channel_number];
+                            cooldown_timestamps[channel_number] = Instant::now();
+                            report_changed = true;
+                            info!(
+                                "channel {} deviation {}",
+                                channel_number, deviation_averaged
+                            );
+                        }
+                    } else {
+                        report_raw[channel_number] = 0;
+                        report_changed = true;
+                    }
+                }
+            }
+            if !report_changed {
+                continue;
+            } else {
+                //check if kat/dom triggered at the same time.
+                if report_raw[0] > 0 && report_raw[1] > 0 {
+                    if array_of_deviations_averaged[0] < array_of_deviations_averaged[1] {
+                        report_raw[0] = 0;
+                    }
+                    if array_of_deviations_averaged[1] < array_of_deviations_averaged[0] {
+                        report_raw[1] = 0;
+                    }
+                }
+                if report_raw[2] > 0 && report_raw[3] > 0 {
+                    if array_of_deviations_averaged[2] < array_of_deviations_averaged[3] {
+                        report_raw[2] = 0;
+                    }
+                    if array_of_deviations_averaged[3] < array_of_deviations_averaged[2] {
+                        report_raw[3] = 0;
+                    }
+                }
+            }
             let report = KeyboardReport {
-                keycodes: [4, 0, 0, 0, 0, 0],
+                keycodes: report_raw,
                 leds: 0,
                 modifier: 0,
                 reserved: 0,
@@ -132,16 +236,7 @@ async fn main(_spawner: Spawner) {
                 Ok(()) => {}
                 Err(e) => warn!("Failed to send report: {:?}", e),
             };
-            let report = KeyboardReport {
-                keycodes: [0, 0, 0, 0, 0, 0],
-                leds: 0,
-                modifier: 0,
-                reserved: 0,
-            };
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            };
+            Timer::after_millis(2).await; // for out_fut and usb_fut to do their thing
         }
     };
 
